@@ -80,7 +80,8 @@ def cut_segment(ffmpeg, src, t_start, t_end, out_path):
         out_path,
     ]
     subprocess.run(cmd, check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   creationflags=subprocess.CREATE_NO_WINDOW)
 
 
 def concat_segments(ffmpeg, segment_paths, out_path):
@@ -99,7 +100,8 @@ def concat_segments(ffmpeg, segment_paths, out_path):
             out_path,
         ]
         subprocess.run(cmd, check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
     finally:
         os.unlink(list_path)
 
@@ -110,7 +112,8 @@ class VideoEditor(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Video Editor  ·  Cut & Splice")
-        self.resizable(False, False)
+        self.resizable(True, True)
+        self.minsize(520, 480)
         self.configure(bg="#111")
         _icon = os.path.join(os.path.dirname(os.path.abspath(__file__)), "video_editor.ico")
         if os.path.exists(_icon):
@@ -125,10 +128,14 @@ class VideoEditor(tk.Tk):
         self._markers    = []         # list of frame numbers, kept sorted
         self._video_path = ""
         self._dragging   = False
+        self._drag_marker_idx = None   # index into self._markers being dragged
+        self._drag_start_x    = None
+        self._playing    = False
 
         self._build_ui()
         self._center()
         self.bind("<m>", lambda e: self._add_marker())
+        self.bind("<space>", lambda e: self._toggle_play())
 
         if not DEPS_OK:
             messagebox.showerror(
@@ -166,16 +173,14 @@ class VideoEditor(tk.Tk):
         tk.Frame(self, height=1, bg="#333").pack(fill="x", padx=16, pady=4)
 
         # ── preview canvas ──
-        preview_frame = tk.Frame(self, bg="#000",
-                                 width=PREVIEW_W, height=PREVIEW_H)
-        preview_frame.pack_propagate(False)
-        preview_frame.pack(padx=16, pady=(6, 0))
+        preview_frame = tk.Frame(self, bg="#000")
+        preview_frame.pack(fill="both", expand=True, padx=16, pady=(6, 0))
 
         self._canvas = tk.Canvas(
-            preview_frame, width=PREVIEW_W, height=PREVIEW_H,
-            bg="#000", highlightthickness=0,
+            preview_frame, bg="#000", highlightthickness=0,
         )
-        self._canvas.pack()
+        self._canvas.pack(fill="both", expand=True)
+        self._canvas.bind("<Configure>", self._on_canvas_resize)
         self._draw_placeholder()
 
         # ── time label ──
@@ -211,6 +216,9 @@ class VideoEditor(tk.Tk):
         self._tl.bind("<ButtonPress-1>",   self._tl_press)
         self._tl.bind("<B1-Motion>",       self._tl_drag)
         self._tl.bind("<ButtonRelease-1>", self._tl_release)
+        self._tl.bind("<ButtonPress-3>",   self._tl_marker_press)
+        self._tl.bind("<B3-Motion>",       self._tl_marker_drag)
+        self._tl.bind("<ButtonRelease-3>", self._tl_marker_release)
         self._tl.bind("<Configure>",       self._tl_redraw)
 
         # ── slider ──
@@ -237,6 +245,14 @@ class VideoEditor(tk.Tk):
 
         btn_cfg = dict(font=("Courier New", 10, "bold"),
                        relief="flat", bd=0, padx=18, pady=8, cursor="hand2")
+
+        self._play_btn = tk.Button(
+            ctrl, text="▶  Play",
+            command=self._toggle_play,
+            bg="#2a2a2a", fg=TXT, activebackground="#333",
+            state="disabled", **btn_cfg,
+        )
+        self._play_btn.pack(side="left", padx=(0, 20))
 
         self._mark_btn = tk.Button(
             ctrl, text="◆  Add Marker",
@@ -293,11 +309,11 @@ class VideoEditor(tk.Tk):
 
     def _draw_placeholder(self):
         self._canvas.delete("all")
-        self._canvas.create_rectangle(
-            0, 0, PREVIEW_W, PREVIEW_H, fill="#000", outline=""
-        )
+        w = self._canvas.winfo_width()  or PREVIEW_W
+        h = self._canvas.winfo_height() or PREVIEW_H
+        self._canvas.create_rectangle(0, 0, w, h, fill="#000", outline="")
         self._canvas.create_text(
-            PREVIEW_W // 2, PREVIEW_H // 2,
+            w // 2, h // 2,
             text="No video loaded",
             font=("Georgia", 16), fill="#444",
         )
@@ -320,6 +336,7 @@ class VideoEditor(tk.Tk):
         )
         if not path:
             return
+        self._stop_playback()
         if self._cap:
             self._cap.release()
 
@@ -352,6 +369,7 @@ class VideoEditor(tk.Tk):
             f"{self._fps:.2f} fps  |  "
             f"{self._total_frames} frames"
         )
+        self._play_btn.config(state="normal")
         self._mark_btn.config(state="normal")
         self._save_btn.config(state="normal")
 
@@ -367,9 +385,12 @@ class VideoEditor(tk.Tk):
             return
         self._current_frame = frame_no
 
-        # resize to preview size maintaining aspect ratio
+        cw = self._canvas.winfo_width()  or PREVIEW_W
+        ch = self._canvas.winfo_height() or PREVIEW_H
+
+        # resize to canvas size maintaining aspect ratio
         fh, fw = frame.shape[:2]
-        scale  = min(PREVIEW_W / fw, PREVIEW_H / fh)
+        scale  = min(cw / fw, ch / fh)
         nw, nh = int(fw * scale), int(fh * scale)
         resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
         rgb     = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
@@ -378,14 +399,18 @@ class VideoEditor(tk.Tk):
         photo  = ImageTk.PhotoImage(img)
 
         # center on canvas
-        x = (PREVIEW_W - nw) // 2
-        y = (PREVIEW_H - nh) // 2
+        x = (cw - nw) // 2
+        y = (ch - nh) // 2
         self._canvas.delete("all")
-        self._canvas.create_rectangle(
-            0, 0, PREVIEW_W, PREVIEW_H, fill="#000", outline=""
-        )
+        self._canvas.create_rectangle(0, 0, cw, ch, fill="#000", outline="")
         self._canvas.create_image(x, y, anchor="nw", image=photo)
         self._canvas.image = photo   # prevent GC
+
+    def _on_canvas_resize(self, event=None):
+        if self._cap:
+            self._show_frame(self._current_frame)
+        else:
+            self._draw_placeholder()
 
     def _update_time_label(self):
         cur = self._current_frame / self._fps
@@ -398,6 +423,7 @@ class VideoEditor(tk.Tk):
     def _slider_moved(self, val):
         if not self._cap:
             return
+        self._stop_playback()
         frame_no = int(float(val))
         self._show_frame(frame_no)
         self._update_time_label()
@@ -406,6 +432,7 @@ class VideoEditor(tk.Tk):
     # ── timeline ──────────────────────────────────────────────────────────────
 
     def _tl_press(self, event):
+        self._stop_playback()
         self._dragging = True
         self._tl_seek(event.x)
 
@@ -415,6 +442,51 @@ class VideoEditor(tk.Tk):
 
     def _tl_release(self, event):
         self._dragging = False
+
+    def _tl_marker_press(self, event):
+        """Right-click: grab the nearest marker within 10 px."""
+        if not self._cap or not self._markers:
+            return
+        w = self._tl.winfo_width()
+        if w <= 0:
+            return
+        # find closest marker by pixel distance
+        best_idx  = None
+        best_dist = float("inf")
+        for i, m in enumerate(self._markers):
+            mx = int(m / self._total_frames * w)
+            d  = abs(event.x - mx)
+            if d < best_dist:
+                best_dist = d
+                best_idx  = i
+        if best_dist <= 10:
+            self._drag_marker_idx = best_idx
+            self._drag_start_x    = event.x
+
+    def _tl_marker_drag(self, event):
+        """Right-drag: slide the grabbed marker."""
+        if self._drag_marker_idx is None or not self._cap:
+            return
+        w = self._tl.winfo_width()
+        if w <= 0:
+            return
+        frac     = max(0.0, min(1.0, event.x / w))
+        frame_no = int(frac * (self._total_frames - 1))
+        self._markers[self._drag_marker_idx] = frame_no
+        self._markers.sort()
+        # keep drag index consistent after sort
+        self._drag_marker_idx = self._markers.index(frame_no)
+        self._update_markers_label()
+        self._update_expected_duration()
+        self._tl_redraw()
+
+    def _tl_marker_release(self, event):
+        """Right-release: drop the marker."""
+        if self._drag_marker_idx is not None:
+            t = self._fmt_time(self._markers[self._drag_marker_idx] / self._fps)
+            self._status_var.set(f"Marker moved to {t}")
+        self._drag_marker_idx = None
+        self._drag_start_x    = None
 
     def _tl_seek(self, x):
         if not self._cap:
@@ -636,13 +708,46 @@ class VideoEditor(tk.Tk):
     # ── utilities ─────────────────────────────────────────────────────────────
 
     def _set_ui_state(self, state):
-        for w in (self._open_btn, self._mark_btn,
+        for w in (self._open_btn, self._play_btn, self._mark_btn,
                   self._undo_btn, self._clear_btn, self._save_btn,
                   self._slider):
             try:
                 w.config(state=state)
             except Exception:
                 pass
+
+    # ── playback ──────────────────────────────────────────────────────────────
+
+    def _toggle_play(self):
+        if not self._cap:
+            return
+        if self._playing:
+            self._stop_playback()
+        else:
+            self._playing = True
+            self._play_btn.config(text="⏸  Pause")
+            self._play_loop()
+
+    def _stop_playback(self):
+        self._playing = False
+        try:
+            self._play_btn.config(text="▶  Play")
+        except Exception:
+            pass
+
+    def _play_loop(self):
+        if not self._playing or not self._cap:
+            return
+        next_frame = self._current_frame + 1
+        if next_frame >= self._total_frames:
+            self._stop_playback()
+            return
+        self._show_frame(next_frame)
+        self._slider_var.set(next_frame)
+        self._update_time_label()
+        self._tl_redraw()
+        delay = max(1, int(1000 / self._fps))
+        self.after(delay, self._play_loop)
 
     @staticmethod
     def _gui(fn, *args, **kwargs):
