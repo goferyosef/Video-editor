@@ -112,6 +112,9 @@ class VideoEditor(tk.Tk):
         self.title("Video Editor  ·  Cut & Splice")
         self.resizable(False, False)
         self.configure(bg="#111")
+        _icon = os.path.join(os.path.dirname(os.path.abspath(__file__)), "video_editor.ico")
+        if os.path.exists(_icon):
+            self.iconbitmap(_icon)
 
         # state
         self._cap        = None       # cv2.VideoCapture
