@@ -190,6 +190,14 @@ class VideoEditor(tk.Tk):
                  font=("Courier New", 9), fg=DIM, bg=BG,
                  width=46, anchor="e").pack(side="right")
 
+        # ── expected duration row ──
+        dur_row = tk.Frame(self, bg=BG)
+        dur_row.pack(fill="x", padx=16, pady=(1, 0))
+        self._expected_var = tk.StringVar(value="")
+        tk.Label(dur_row, textvariable=self._expected_var,
+                 font=("Courier New", 9), fg="#7ab87a", bg=BG,
+                 anchor="e").pack(side="right")
+
         # ── timeline canvas ──
         tl_frame = tk.Frame(self, bg=CARD, bd=0)
         tl_frame.pack(fill="x", padx=16, pady=(6, 0))
@@ -334,6 +342,7 @@ class VideoEditor(tk.Tk):
         self._show_frame(0)
         self._update_time_label()
         self._update_markers_label()
+        self._update_expected_duration()
         self._tl_redraw()
 
         name = os.path.basename(path)
@@ -462,11 +471,11 @@ class VideoEditor(tk.Tk):
     def _add_marker(self):
         f = self._current_frame
         if f in self._markers:
-            self._status_var.set("Marker already exists at this position.")
-            return
+            return                          # silently ignore exact duplicate
         self._markers.append(f)
         self._markers.sort()
         self._update_markers_label()
+        self._update_expected_duration()
         self._tl_redraw()
         self._undo_btn.config(state="normal")
         self._clear_btn.config(state="normal")
@@ -479,6 +488,7 @@ class VideoEditor(tk.Tk):
         removed = self._markers.pop()
         t = self._fmt_time(removed / self._fps)
         self._update_markers_label()
+        self._update_expected_duration()
         self._tl_redraw()
         if not self._markers:
             self._undo_btn.config(state="disabled")
@@ -488,10 +498,23 @@ class VideoEditor(tk.Tk):
     def _clear_markers(self):
         self._markers.clear()
         self._update_markers_label()
+        self._update_expected_duration()
         self._tl_redraw()
         self._undo_btn.config(state="disabled")
         self._clear_btn.config(state="disabled")
         self._status_var.set("All markers cleared.")
+
+    def _update_expected_duration(self):
+        if not self._markers or self._total_frames == 0:
+            self._expected_var.set("")
+            return
+        boundaries = [0] + sorted(self._markers) + [self._total_frames]
+        total = sum(
+            (boundaries[i + 1] - boundaries[i]) / self._fps
+            for i in range(1, len(boundaries) - 1, 2)
+            if boundaries[i + 1] - boundaries[i] > 0
+        )
+        self._expected_var.set(f"Expected output: {self._fmt_time(total)}")
 
     def _update_markers_label(self):
         n = len(self._markers)
