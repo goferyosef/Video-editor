@@ -131,6 +131,9 @@ class VideoEditor(tk.Tk):
         self._drag_marker_idx = None   # index into self._markers being dragged
         self._drag_start_x    = None
         self._playing    = False
+        self._suppress_slider_cb = False  # prevent slider callback during playback
+        self._play_t0    = 0.0            # wall-clock time when playback started
+        self._play_f0    = 0              # frame number when playback started
 
         self._build_ui()
         self._center()
@@ -421,26 +424,44 @@ class VideoEditor(tk.Tk):
     # ── slider ────────────────────────────────────────────────────────────────
 
     def _slider_moved(self, val):
-        if not self._cap:
+        if not self._cap or self._suppress_slider_cb:
             return
-        self._stop_playback()
         frame_no = int(float(val))
         self._show_frame(frame_no)
         self._update_time_label()
         self._tl_redraw()
+        if self._playing:
+            self._play_t0 = time.perf_counter()
+            self._play_f0 = frame_no
 
     # ── timeline ──────────────────────────────────────────────────────────────
 
     def _tl_press(self, event):
-        self._stop_playback()
+        # if click is near a marker, drag it instead of seeking
+        if self._cap and self._markers:
+            w = self._tl.winfo_width()
+            if w > 0:
+                best_idx, best_dist = None, float("inf")
+                for i, m in enumerate(self._markers):
+                    d = abs(event.x - int(m / self._total_frames * w))
+                    if d < best_dist:
+                        best_dist, best_idx = d, i
+                if best_dist <= 10:
+                    self._drag_marker_idx = best_idx
+                    self._drag_start_x    = event.x
+                    return
         self._dragging = True
         self._tl_seek(event.x)
 
     def _tl_drag(self, event):
-        if self._dragging:
+        if self._drag_marker_idx is not None:
+            self._tl_marker_drag(event)
+        elif self._dragging:
             self._tl_seek(event.x)
 
     def _tl_release(self, event):
+        if self._drag_marker_idx is not None:
+            self._tl_marker_release(event)
         self._dragging = False
 
     def _tl_marker_press(self, event):
@@ -496,10 +517,15 @@ class VideoEditor(tk.Tk):
             return
         frac     = max(0.0, min(1.0, x / w))
         frame_no = int(frac * (self._total_frames - 1))
+        self._suppress_slider_cb = True
         self._slider_var.set(frame_no)
+        self._suppress_slider_cb = False
         self._show_frame(frame_no)
         self._update_time_label()
         self._tl_redraw()
+        if self._playing:
+            self._play_t0 = time.perf_counter()
+            self._play_f0 = frame_no
 
     def _tl_redraw(self, event=None):
         tl = self._tl
@@ -725,6 +751,8 @@ class VideoEditor(tk.Tk):
             self._stop_playback()
         else:
             self._playing = True
+            self._play_t0  = time.perf_counter()
+            self._play_f0  = self._current_frame
             self._play_btn.config(text="⏸  Pause")
             self._play_loop()
 
@@ -743,10 +771,15 @@ class VideoEditor(tk.Tk):
             self._stop_playback()
             return
         self._show_frame(next_frame)
+        self._suppress_slider_cb = True
         self._slider_var.set(next_frame)
+        self._suppress_slider_cb = False
         self._update_time_label()
         self._tl_redraw()
-        delay = max(1, int(1000 / self._fps))
+        # schedule next frame accounting for time already spent rendering
+        frames_played = next_frame - self._play_f0 + 1
+        target = self._play_t0 + frames_played / self._fps
+        delay  = max(1, int((target - time.perf_counter()) * 1000))
         self.after(delay, self._play_loop)
 
     @staticmethod
